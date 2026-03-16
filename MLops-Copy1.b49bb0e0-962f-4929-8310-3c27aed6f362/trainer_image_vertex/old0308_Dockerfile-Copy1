@@ -1,0 +1,22 @@
+# FROM us-docker.pkg.dev/vertex-ai/training/sklearn-cpu.1-0
+# 1. コンポーネントの base_image と完全に一致させる
+FROM us-docker.pkg.dev/vertex-ai/training/sklearn-cpu.1-0
+
+# RUN pip install -U fire cloudml-hypertune scikit-learn==1.2.2
+# 2. scikit-learn のバージョン指定（==1.2.2）を削除し、
+#    ベースイメージ標準の 1.0 系を使用するようにします
+# RUN pip install -U fire cloudml-hypertune pandas
+# RUN pip install -U fire cloudml-hypertune pandas scikit-learn==1.0.2
+
+# 修正後の Dockerfile 8行目
+RUN pip install fire==0.4.0 cloudml-hypertune==0.1.0 pandas==1.3.5 scikit-learn==1.0.2
+
+# WORKDIR /app
+WORKDIR /app
+
+# COPY train.py .
+# ENTRYPOINT ["python", "train.py"]
+
+# 3. 学習スクリプトをコピー
+COPY train.py .
+ENTRYPOINT ["python", "train.py"]

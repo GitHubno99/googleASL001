@@ -1,0 +1,294 @@
+# PIPELINE DEFINITION
+# Name: gpr-regression-pipeline
+# Description: The pipeline for training and deploying a Gaussian Process Regressor
+# Inputs:
+#    max_trial_count: int [Default: 5.0]
+#    parallel_trial_count: int [Default: 5.0]
+#    pipeline_root: str [Default: 'gs://qwiklabs-asl-00-8534302ca246-kfp-artifact-store/pipeline']
+#    r2_score_deployment_threshold: float [Default: 0.6]
+#    serving_container_uri: str [Default: 'us-docker.pkg.dev/vertex-ai/prediction/sklearn-cpu.1-2:latest']
+#    training_container_uri: str [Default: 'us-docker.pkg.dev/qwiklabs-asl-00-8534302ca246/asl-artifact-repo/trainer_image_covertype_vertex:V11']
+#    training_file_path: str [Default: 'gs://qwiklabs-asl-00-8534302ca246-kfp-artifact-store/data/training/dataset.csv']
+#    validation_file_path: str [Default: 'gs://qwiklabs-asl-00-8534302ca246-kfp-artifact-store/data/validation/dataset.csv']
+components:
+  comp-train-and-deploy:
+    executorLabel: exec-train-and-deploy
+    inputDefinitions:
+      parameters:
+        alpha:
+          parameterType: NUMBER_DOUBLE
+        container_uri:
+          parameterType: STRING
+        location:
+          parameterType: STRING
+        project:
+          parameterType: STRING
+        serving_container_uri:
+          parameterType: STRING
+        staging_bucket:
+          parameterType: STRING
+        training_file_path:
+          parameterType: STRING
+        validation_file_path:
+          parameterType: STRING
+  comp-tune-hyperparameters:
+    executorLabel: exec-tune-hyperparameters
+    inputDefinitions:
+      parameters:
+        container_uri:
+          parameterType: STRING
+        location:
+          parameterType: STRING
+        max_trial_count:
+          parameterType: NUMBER_INTEGER
+        parallel_trial_count:
+          parameterType: NUMBER_INTEGER
+        project:
+          parameterType: STRING
+        staging_bucket:
+          parameterType: STRING
+        training_file_path:
+          parameterType: STRING
+        validation_file_path:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        best_alpha:
+          parameterType: NUMBER_DOUBLE
+        best_r2_score:
+          parameterType: NUMBER_DOUBLE
+defaultPipelineRoot: gs://qwiklabs-asl-00-8534302ca246-kfp-artifact-store/pipeline
+deploymentSpec:
+  executors:
+    exec-train-and-deploy:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - train_and_deploy
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'google-cloud-aiplatform'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.15.2'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef train_and_deploy(\n    project: str,\n    location: str,\n  \
+          \  container_uri: str,\n    serving_container_uri: str,\n    training_file_path:\
+          \ str,\n    validation_file_path: str,\n    staging_bucket: str,\n    alpha:\
+          \ float,\n):\n    from google.cloud import aiplatform\n    import time\n\
+          \n    aiplatform.init(project=project, location=location, staging_bucket=staging_bucket)\n\
+          \n    job = aiplatform.CustomContainerTrainingJob(\n        display_name=\"\
+          gpr_final_training\",\n        container_uri=container_uri,\n        command=[\n\
+          \            \"python\", \"train.py\",\n            f\"--training_dataset_path={training_file_path}\"\
+          ,\n            f\"--validation_dataset_path={validation_file_path}\",\n\
+          \            f\"--alpha={alpha}\",\n            \"--hptune=False\",\n  \
+          \      ],\n        model_serving_container_image_uri=serving_container_uri,\n\
+          \    )\n\n    # \u2605 \u4FEE\u6B63\u30DD\u30A4\u30F3\u30C8\uFF1A\u30E2\u30C7\
+          \u30EB\u306E\u4FDD\u5B58\u5148\u30D5\u30A9\u30EB\u30C0\u3092\u6BCE\u56DE\
+          \u88AB\u3089\u306A\u3044\u3088\u3046\u306B\u751F\u6210\u3059\u308B\n   \
+          \ job_dir = f\"{staging_bucket}/model_output_{int(time.time())}\"\n    model\
+          \ = job.run(\n        replica_count=1, \n        model_display_name=\"gpr_kfp_model_v2\"\
+          ,\n        base_output_dir=job_dir  # \u660E\u793A\u7684\u306B\u4FDD\u5B58\
+          \u5834\u6240\u3092\u6307\u5B9A\n    )\n\n    endpoint_name = \"covertype_GCP_model_endpoint\"\
+          \n    endpoints = aiplatform.Endpoint.list(\n        filter=f'display_name=\"\
+          {endpoint_name}\"',\n        order_by=\"create_time desc\"\n    )\n\n  \
+          \  if endpoints:\n        endpoint = endpoints[0]\n    else:\n        endpoint\
+          \ = aiplatform.Endpoint.create(display_name=endpoint_name)\n\n    model.deploy(\n\
+          \        endpoint=endpoint,\n        machine_type=\"n1-standard-2\",\n \
+          \       min_replica_count=1,\n        max_replica_count=1,\n        traffic_split={\"\
+          0\": 100},\n        sync=True\n    )\n\n"
+        image: python:3.10
+    exec-tune-hyperparameters:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - tune_hyperparameters
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'google-cloud-aiplatform'\
+          \ 'scikit-learn==1.2.2' 'pandas'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.15.2' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef tune_hyperparameters(\n    project: str,\n    location: str,\n\
+          \    container_uri: str,\n    training_file_path: str,\n    validation_file_path:\
+          \ str,\n    staging_bucket: str,\n    max_trial_count: int,\n    parallel_trial_count:\
+          \ int,\n) -> NamedTuple(\n    \"Outputs\",\n    [(\"best_r2_score\", float),\
+          \ (\"best_alpha\", float)],\n):\n    # pylint: disable=import-outside-toplevel\n\
+          \    from google.cloud import aiplatform\n    from google.cloud.aiplatform\
+          \ import hyperparameter_tuning as hpt\n\n    aiplatform.init(\n        project=project,\
+          \ location=location, staging_bucket=staging_bucket\n    )\n\n    worker_pool_specs\
+          \ = [\n        {\n            \"machine_spec\": {\n                \"machine_type\"\
+          : \"n1-standard-4\",\n            },\n            \"replica_count\": 1,\n\
+          \            \"container_spec\": {\n                \"image_uri\": container_uri,\n\
+          \                \"args\": [\n                    f\"--training_dataset_path={training_file_path}\"\
+          ,\n                    f\"--validation_dataset_path={validation_file_path}\"\
+          ,\n                    \"--hptune\",\n                ],\n            },\n\
+          \        }\n    ]\n\n    custom_job = aiplatform.CustomJob(\n        display_name=\"\
+          gpr_kfp_trial_job\",\n        worker_pool_specs=worker_pool_specs,\n   \
+          \ )\n\n    # \u30CF\u30A4\u30D1\u30FC\u30D1\u30E9\u30E1\u30FC\u30BF\u63A2\
+          \u7D22\u306E\u8A2D\u5B9A\n    hp_job = aiplatform.HyperparameterTuningJob(\n\
+          \        display_name=\"gpr_kfp_tuning_job\",\n        custom_job=custom_job,\n\
+          \        metric_spec={\n            \"r2_score\": \"maximize\",\n      \
+          \  },\n        parameter_spec={\n            # parameter_spec \u306E alpha\
+          \ \u306E\u7BC4\u56F2\u3092\u5FAE\u8ABF\u6574\n            \"alpha\": hpt.DoubleParameterSpec(\n\
+          \                min=1.0e-6, max=1.0e-1, scale=\"log\" # \u4E0B\u9650\u3092\
+          \ 1e-10 \u304B\u3089 1e-6 \u306B\u5909\u66F4\n            ),\n\n       \
+          \     # # GPR\u306E\u89B3\u6E2C\u30CE\u30A4\u30BA(alpha)\u3092\u63A2\u7D22\
+          \n            # # \u975E\u5E38\u306B\u5C0F\u3055\u306A\u5024(1e-10)\u304B\
+          \u3089\u3001\u30CE\u30A4\u30BA\u304C\u5927\u304D\u3044\u5834\u5408(0.1)\u307E\
+          \u3067\u5BFE\u6570\u30B9\u30B1\u30FC\u30EB\u3067\u63A2\u7D22\u3057\u307E\
+          \u3059\n            # \"alpha\": hpt.DoubleParameterSpec(\n            #\
+          \     min=1.0e-10, max=1.0e-1, scale=\"log\"\n            # ),\n       \
+          \ },\n        max_trial_count=max_trial_count,\n        parallel_trial_count=parallel_trial_count,\n\
+          \    )\n\n    hp_job.run()\n\n    best_r2_score = -float('inf')\n    best_trial\
+          \ = None\n\n    for trial in hp_job.trials:\n        if not hasattr(trial,\
+          \ 'final_measurement') or not trial.final_measurement:\n            continue\n\
+          \n        for metric in trial.final_measurement.metrics:\n            if\
+          \ metric.metric_id == \"r2_score\":\n                if metric.value > best_r2_score:\n\
+          \                    best_r2_score = metric.value\n                    best_trial\
+          \ = trial\n\n    if best_trial is None:\n        raise RuntimeError(\"\u6709\
+          \u52B9\u306A r2_score \u3092\u6301\u3064\u8A66\u884C\u304C\u898B\u3064\u304B\
+          \u308A\u307E\u305B\u3093\u3067\u3057\u305F\u3002\u5B66\u7FD2\u30ED\u30B0\
+          \u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002\")\n\n    #\
+          \ \u6700\u826F\u306E\u8A66\u884C\u304B\u3089 alpha \u3092\u53D6\u5F97\n\
+          \    best_alpha = float(next(p.value for p in best_trial.parameters if p.parameter_id\
+          \ == 'alpha'))\n\n    return (float(best_r2_score), float(best_alpha))\n\
+          \n"
+        image: python:3.11
+pipelineInfo:
+  description: The pipeline for training and deploying a Gaussian Process Regressor
+  name: gpr-regression-pipeline
+root:
+  dag:
+    tasks:
+      train-and-deploy:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-train-and-deploy
+        dependentTasks:
+        - tune-hyperparameters
+        inputs:
+          parameters:
+            alpha:
+              taskOutputParameter:
+                outputParameterKey: best_alpha
+                producerTask: tune-hyperparameters
+            container_uri:
+              componentInputParameter: training_container_uri
+            location:
+              runtimeValue:
+                constant: us-central1
+            pipelinechannel--pipeline_root:
+              componentInputParameter: pipeline_root
+            project:
+              runtimeValue:
+                constant: qwiklabs-asl-00-8534302ca246
+            serving_container_uri:
+              componentInputParameter: serving_container_uri
+            staging_bucket:
+              runtimeValue:
+                constant: '{{$.inputs.parameters[''pipelinechannel--pipeline_root'']}}/staging'
+            training_file_path:
+              componentInputParameter: training_file_path
+            validation_file_path:
+              componentInputParameter: validation_file_path
+        taskInfo:
+          name: train-and-deploy
+      tune-hyperparameters:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-tune-hyperparameters
+        inputs:
+          parameters:
+            container_uri:
+              componentInputParameter: training_container_uri
+            location:
+              runtimeValue:
+                constant: us-central1
+            max_trial_count:
+              componentInputParameter: max_trial_count
+            parallel_trial_count:
+              componentInputParameter: parallel_trial_count
+            pipelinechannel--pipeline_root:
+              componentInputParameter: pipeline_root
+            project:
+              runtimeValue:
+                constant: qwiklabs-asl-00-8534302ca246
+            staging_bucket:
+              runtimeValue:
+                constant: '{{$.inputs.parameters[''pipelinechannel--pipeline_root'']}}/staging'
+            training_file_path:
+              componentInputParameter: training_file_path
+            validation_file_path:
+              componentInputParameter: validation_file_path
+        taskInfo:
+          name: tune-hyperparameters
+  inputDefinitions:
+    parameters:
+      max_trial_count:
+        defaultValue: 5.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      parallel_trial_count:
+        defaultValue: 5.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      pipeline_root:
+        defaultValue: gs://qwiklabs-asl-00-8534302ca246-kfp-artifact-store/pipeline
+        isOptional: true
+        parameterType: STRING
+      r2_score_deployment_threshold:
+        defaultValue: 0.6
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+      serving_container_uri:
+        defaultValue: us-docker.pkg.dev/vertex-ai/prediction/sklearn-cpu.1-2:latest
+        isOptional: true
+        parameterType: STRING
+      training_container_uri:
+        defaultValue: us-docker.pkg.dev/qwiklabs-asl-00-8534302ca246/asl-artifact-repo/trainer_image_covertype_vertex:V11
+        isOptional: true
+        parameterType: STRING
+      training_file_path:
+        defaultValue: gs://qwiklabs-asl-00-8534302ca246-kfp-artifact-store/data/training/dataset.csv
+        isOptional: true
+        parameterType: STRING
+      validation_file_path:
+        defaultValue: gs://qwiklabs-asl-00-8534302ca246-kfp-artifact-store/data/validation/dataset.csv
+        isOptional: true
+        parameterType: STRING
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.15.2
